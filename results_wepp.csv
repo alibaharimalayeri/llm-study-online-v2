@@ -1,7 +1,0 @@
-timestamp,name,base_id,qid,question,answer_variant,accuracy,completeness,usefulness,style,comment
-2025-10-17T08:16:24.515223,wepp,Q1,Q1a,When do you perform a DAA rather than an anterolateral or posterior approach?,A,4,5,3,5,
-2025-10-17T08:16:24.519344,wepp,Q1,Q1b,When do you perform a DAA rather than an anterolateral or posterior approach?,B,5,3,5,4,
-2025-10-17T08:16:24.522349,wepp,Q1,Q1c,When do you perform a DAA rather than an anterolateral or posterior approach?,C,3,5,3,5,
-2025-10-17T08:16:53.950803,wepp,Q2,Q2a,Which imaging do we need for the surgical planning?,A,3,5,4,3,
-2025-10-17T08:16:53.952803,wepp,Q2,Q2b,Which imaging do we need for the surgical planning?,B,3,5,3,5,
-2025-10-17T08:16:53.954805,wepp,Q2,Q2c,Which imaging do we need for the surgical planning?,C,3,4,3,5,
