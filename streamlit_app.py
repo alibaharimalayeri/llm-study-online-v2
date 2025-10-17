@@ -54,6 +54,7 @@ def get_ws():
     except WorksheetNotFound:
         ws = sh.add_worksheet(title=RESULTS_SHEET_NAME, rows=1000, cols=len(HEADER))
         ws.append_row(HEADER, value_input_option="RAW")
+
     # Ensure header is correct
     existing_header = ws.row_values(1)
     if existing_header != HEADER:
@@ -80,30 +81,40 @@ def append_rows_ws(ws, rows: List[Dict[str, object]], max_retries: int = 5):
                 continue
             raise
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=30)
 def get_answered_bases_for_participant(participant_raw: str) -> set:
     """
-    Return base_ids already answered by this participant (cached 60s).
-    Compares using normalized participant (strip+lower).
+    Return base_ids already answered by this participant (cached briefly).
+    Uses header-aware read to avoid partial / ragged rows.
     """
     ws = get_ws()
-    want = norm(participant_raw)
-
-    # Read only needed columns (B:C -> participant, base_id)
-    rng = f"{RESULTS_SHEET_NAME}!B:C"
-    try:
-        vals = ws.get(rng)
-    except APIError:
+    # Get ALL values once (one API call), then build a DataFrame with the header row.
+    rows = ws.get_all_values()  # includes header at rows[0]
+    if not rows or len(rows[0]) == 0:
         return set()
 
-    bases = set()
-    for i, row in enumerate(vals):
-        if i == 0:  # skip header
-            continue
-        # row[0] = participant, row[1] = base_id (may be missing if short row)
-        if len(row) >= 2 and norm(row[0]) == want and row[1]:
-            bases.add(row[1])
-    return bases
+    header = rows[0]
+    # If the header is not exactly what we expect, try to map columns by name.
+    # (This makes us tolerant to column order changes.)
+    try:
+        df = pd.DataFrame(rows[1:], columns=header)
+    except ValueError:
+        # Fallback to strict assumption
+        return set()
+
+    # Normalize column names we rely on
+    cols = {c.lower().strip(): c for c in df.columns}
+    if "participant" not in cols or "base_id" not in cols:
+        return set()
+
+    participant_col = cols["participant"]
+    base_col = cols["base_id"]
+
+    # Filter by normalized participant
+    want = norm(participant_raw)
+    mask = df[participant_col].astype(str).str.strip().str.lower() == want
+    base_vals = df.loc[mask, base_col].dropna().astype(str).str.strip()
+    return set(base_vals.tolist())
 
 # ====== LOCAL HELPERS ======
 def base_id(qid: str) -> str:
@@ -134,7 +145,6 @@ st.sidebar.caption(
 )
 
 # Load questions
-QUESTIONS_CSV = APP_DIR / "questions.csv"
 if not QUESTIONS_CSV.exists():
     st.error(f"Missing questions file: {QUESTIONS_CSV.name}")
     st.stop()
@@ -247,6 +257,6 @@ with mid:
             st.success("All questions completed! Thank you.")
             st.stop()
 
-# Small helper text so you can verify resume set:
+# Debug aide
 with st.expander("Resume debug (safe to ignore)"):
     st.write("Answered groups detected for you:", sorted(list(answered_bases)))
