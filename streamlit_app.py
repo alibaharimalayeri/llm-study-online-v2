@@ -32,13 +32,17 @@ HEADER = [
     "comment",
 ]
 
+def norm(s: str) -> str:
+    """Normalize strings for comparison (strip + lowercase)."""
+    return (s or "").strip().lower()
+
 # ====== GOOGLE SHEETS HELPERS ======
 @st.cache_resource(show_spinner=False)
 def get_ws():
     """Authorize and return the results worksheet (create if missing)."""
-    # secrets: SHEET_ID + [gcp_service_account] block
     if "SHEET_ID" not in st.secrets or "gcp_service_account" not in st.secrets:
-        st.stop()  # hard fail in cloud if secrets missing
+        st.error("Missing secrets: set SHEET_ID and [gcp_service_account] in Streamlit secrets.")
+        st.stop()
 
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES
@@ -50,10 +54,9 @@ def get_ws():
     except WorksheetNotFound:
         ws = sh.add_worksheet(title=RESULTS_SHEET_NAME, rows=1000, cols=len(HEADER))
         ws.append_row(HEADER, value_input_option="RAW")
-    # Ensure header exists / correct
+    # Ensure header is correct
     existing_header = ws.row_values(1)
     if existing_header != HEADER:
-        # If header row is empty, set it; otherwise replace
         if not existing_header:
             ws.update("1:1", [HEADER])
         else:
@@ -65,41 +68,40 @@ def append_rows_ws(ws, rows: List[Dict[str, object]], max_retries: int = 5):
     """Append rows to Google Sheet with simple 429 retry/backoff."""
     values = [[r.get(col, "") for col in HEADER] for r in rows]
     delay = 1.0
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         try:
             ws.append_rows(values, value_input_option="RAW")
             return
         except APIError as e:
             msg = str(e)
-            # 429 rate limit / quota
-            if "429" in msg or "Quota exceeded" in msg:
-                time.sleep(delay)
-                delay = min(delay * 2, 10)
-                continue
-            # occasional 5xx backend hiccups
-            if any(code in msg for code in ["500", "502", "503", "504"]):
+            if "429" in msg or "Quota exceeded" in msg or any(code in msg for code in ["500", "502", "503", "504"]):
                 time.sleep(delay)
                 delay = min(delay * 2, 10)
                 continue
             raise
 
 @st.cache_data(show_spinner=False, ttl=60)
-def get_answered_bases_for_participant(participant: str) -> set:
-    """Return base_ids already answered by this participant (cached 60s)."""
+def get_answered_bases_for_participant(participant_raw: str) -> set:
+    """
+    Return base_ids already answered by this participant (cached 60s).
+    Compares using normalized participant (strip+lower).
+    """
     ws = get_ws()
-    # Pull only the two columns we need to minimize reads
-    # (Header ensures participant=col2, base_id=col3 in our HEADER order)
+    want = norm(participant_raw)
+
+    # Read only needed columns (B:C -> participant, base_id)
     rng = f"{RESULTS_SHEET_NAME}!B:C"
     try:
         vals = ws.get(rng)
     except APIError:
         return set()
-    # vals includes header in first row; skip it
+
     bases = set()
     for i, row in enumerate(vals):
-        if i == 0:
+        if i == 0:  # skip header
             continue
-        if len(row) >= 2 and row[0] == participant and row[1]:
+        # row[0] = participant, row[1] = base_id (may be missing if short row)
+        if len(row) >= 2 and norm(row[0]) == want and row[1]:
             bases.add(row[1])
     return bases
 
@@ -121,20 +123,18 @@ def score_input(label: str, key: str):
     opts = ["—", 1, 2, 3, 4, 5]
     return st.radio(label, opts, index=0, horizontal=True, key=key)
 
-def all_scored(score_dict):
-    return all(v in [1, 2, 3, 4, 5] for v in score_dict.values())
-
 # ====== UI ======
 st.set_page_config(page_title="LLM Answer Comparison (v2)", layout="wide")
 
 st.sidebar.header("Study Info")
-name = st.sidebar.text_input("Name (required)", "")
+name_input = st.sidebar.text_input("Name (required)", "")
 st.sidebar.caption(
     "Your ratings are saved to a secure Google Sheet. "
     "Resume anytime by entering the same name."
 )
 
 # Load questions
+QUESTIONS_CSV = APP_DIR / "questions.csv"
 if not QUESTIONS_CSV.exists():
     st.error(f"Missing questions file: {QUESTIONS_CSV.name}")
     st.stop()
@@ -148,17 +148,18 @@ order, groups = load_groups(df_q)
 st.sidebar.write(f"Questions loaded: {len(order)}")
 
 # Guard for name
-if not name.strip():
+if not name_input.strip():
     st.title("LLM Answer Evaluation (3 answers per question)")
     st.info("Enter your **Name** in the left sidebar to begin.")
     st.stop()
 
-participant = name.strip()
+participant = name_input.strip()              # display value
+participant_norm = norm(participant)          # for comparisons
 
 # Resume: which base_ids already answered?
-answered_bases = get_answered_bases_for_participant(participant)
+answered_bases = get_answered_bases_for_participant(participant_norm)
 
-# Initialize current index at first unanswered
+# Initialize current index at first unanswered (based on normalized matches)
 if "idx" not in st.session_state:
     start_idx = 0
     for i, b in enumerate(order):
@@ -201,7 +202,7 @@ for j in range(len(block)):
         variant_rows.append(
             {
                 "ts_iso": datetime.now(timezone.utc).isoformat(),
-                "participant": participant,
+                "participant": participant,  # stored as typed (nice for reading)
                 "base_id": base,
                 "qid": qid,
                 "question": question_text,
@@ -235,6 +236,7 @@ with mid:
 
         # clear progress cache so next question is computed fresh
         get_answered_bases_for_participant.clear()
+
         st.success("Saved!")
         # advance
         if st.session_state.idx < len(order) - 1:
@@ -245,10 +247,6 @@ with mid:
             st.success("All questions completed! Thank you.")
             st.stop()
 
-# Optional: allow participant to download what they just entered in this step
-df_download = pd.DataFrame(variant_rows)
-st.download_button(
-    "⬇️ Download this page’s entries (CSV)",
-    data=df_download.to_csv(index=False).encode("utf-8"),
-    file_name=f"results_{participant}_{base}.csv",
-)
+# Small helper text so you can verify resume set:
+with st.expander("Resume debug (safe to ignore)"):
+    st.write("Answered groups detected for you:", sorted(list(answered_bases)))
