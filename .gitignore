@@ -4,4 +4,8 @@ secrets.toml
 *.json
 .idea
 LocalProcess
-.venv
+.venv-e "\n# don't commit local results\nresults_*.csv\n" 
+
+# local stuff
+results_*.csv
+.venv/
